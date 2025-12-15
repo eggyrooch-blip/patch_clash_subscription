@@ -1,101 +1,148 @@
-### `patch_resi_chain_sanitized.py` 使用说明（社区版）
+## `patch_clash_subscription.py` 使用说明
 
-这个脚本用于给 **Clash.Meta / mihomo** 风格的订阅 YAML 做“幂等补丁”，自动加入/修正一套：
-- **住宅 SOCKS5 出口**（最终对外显示住宅 IP）
-- **美国中继自动择优**（`url-test`）
-- **一键入口**（只在你选择它时才走住宅；选择其它节点默认不走住宅）
+这个脚本用于给“订阅 YAML”做**幂等补丁**：订阅更新覆盖你的改动后，你再跑一次脚本，把需要的结构/豁免规则补回去（已存在且一致就不改）。
 
-> 说明：脚本是**脱敏版**，敏感信息通过环境变量注入；适合社区分享。
+### 运行逻辑（文本图示）
 
----
-
-### 适用范围（先确认能不能用）
-
-- **适用**：使用 **mihomo / Clash.Meta** 内核的客户端，并且内核支持 `dialer-proxy`
-- **不一定适用**：经典 Clash 老内核（可能忽略 `dialer-proxy` 或报未知字段）
-
-脚本默认针对“订阅合并后的 YAML”结构，要求文件中存在：
-- `proxies:`
-- `proxy-groups:`
-- `rules:`
-
-并且节点名一般使用 `name: 'xxx'` 或 `name: "xxx"` 这种格式。
-
----
-
-### 脚本会做什么（幂等 / 最小改动）
-
-每次运行都会检查并确保（若已存在且一致则不改）：
-- 顶部存在 `port: 7891`（避免某些客户端运行时 `port:7890` 与 `mixed-port:7890` 冲突）
-- `proxies:` 里存在住宅节点 `🚀 前置-SOCKS5`（socks5 + 用户名密码）
-  - 且包含 `dialer-proxy: 🇺🇲 美国-中继择优`（让住宅出口通过美国中继拨号）
-- `proxy-groups:` 里存在：
-  - `🇺🇲 美国-中继择优`：`url-test`，候选为“匹配到的美国节点”
-  - `🏠 住宅+美国择优`：`select`，候选为 `🚀 前置-SOCKS5` / `DIRECT`
-- `🚀 节点选择` 里包含 `🏠 住宅+美国择优`（方便一键选择）
-
-额外特性：
-- **默认会生成备份**：`*.bak.YYYYmmdd-HHMMSS`
-- **幂等**：如果无需变更，输出 `No changes needed (already patched).`
-
----
-
-### 用法（推荐环境变量注入）
-
-#### 1) 设置住宅 SOCKS5 参数（必需）
-
-```bash
-export RESI_SERVER="YOUR_RESI_IP"
-export RESI_PORT="443"
-export RESI_USERNAME="YOUR_USERNAME"
-export RESI_PASSWORD="YOUR_PASSWORD"
+```
+订阅.yaml
+  |
+  | 读取 .env（默认同目录；也支持 --env-file 指定；无需 source）
+  v
+解析配置（features / dialer / bypass / compat）
+  |
+  | dry-run / diff / changelog 只输出，不写文件
+  | 正常模式：写回 + 生成 .bak 备份（可用 --no-backup 关闭）
+  v
+patched 订阅.yaml
 ```
 
-#### 2) 执行补丁（写入 + 备份）
+### 你需要准备什么（推荐统一用 `.env`）
+
+1) 复制一份模板：
 
 ```bash
-python3 "patch_resi_chain_sanitized.py" "/绝对路径/你的订阅.yaml"
+cp .env.example .env
 ```
 
-#### 3) 干跑（只看结果不写入）
+2) 修改 `.env`（本地私有配置文件，通常不提交到 Git；仓库已在 `.gitignore` 里忽略它）：
+- `RESI_SERVER / RESI_PORT / RESI_USERNAME / RESI_PASSWORD`
+- `BYPASS_DOMAINS / BYPASS_IP_CIDRS / BYPASS_INTERNAL_DNS`
+- 其它可选项见 `.env.example` 注释
+
+> 也支持直接用环境变量（export），但为了“入口统一、减少出错”，建议团队/自用都走 `.env`。
+
+---
+
+### 功能概览（features）
+
+- **`resi`**：住宅链路（dialer-proxy + 极简入口）
+- **`bypass`**：白名单豁免（route + DNS + rules 兜底）
+
+### 三种常用模式（A/B/C）
+
+- **A：全选（resi + bypass）**（默认）
 
 ```bash
-python3 "patch_resi_chain_sanitized.py" "/绝对路径/你的订阅.yaml" --dry-run
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml"
 ```
 
-#### 4) 不写备份
+- **B：只启用 resi**
 
 ```bash
-python3 "patch_resi_chain_sanitized.py" "/绝对路径/你的订阅.yaml" --no-backup
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --features resi
+```
+
+- **C：只启用 bypass**
+
+```bash
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --features bypass
+```
+
+你可以只启用其中一个：
+
+```bash
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --features resi
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --features bypass
+```
+
+默认是 `resi,bypass` 都启用。
+
+---
+
+### `resi` 会做什么（按脚本逻辑）
+
+- **确保顶层端口**：`port: 7891`（规避一些客户端运行时端口冲突）
+- **确保住宅节点存在**（`proxies:`）：
+  - 名称默认 `🚀 前置-SOCKS5`（可用 `RESI_PROXY_NAME` 改）
+  - `dialer-proxy` 指向 **“🧪 前置出口-择优”**（默认把所有前置候选放一起择优）
+- **确保分组存在**（`proxy-groups:`）：
+  - `🧪 前置出口-择优`（url-test：候选=全部前置节点；默认 all）
+- **节点选择入口（只追加，不覆盖）**
+  - 默认会把 **`🚀 前置-SOCKS5`** 这个住宅节点 **追加**到你现有的“节点选择”分组里（不删除你原来的节点）
+  - 如需完全跳过可用：`RESI_SKIP_NODE_SELECT_REWRITE=true`
+
+#### “先选前置节点，再选住宅出口”是什么意思？
+- 前置节点（dialer）决定：住宅节点“拨号时”走哪一批普通节点
+- 住宅出口决定：最终公网出口 IP（住宅 IP）
+
+#### 前置拨号候选怎么控制（默认 all，也支持 regex）
+`.env`：
+- `RESI_DIALER_MODE="all"`：把订阅里的所有普通节点都作为候选（默认、最稳）
+- `RESI_DIALER_MODE="regex"` + `RESI_DIALER_REGEX="(US|美国|🇺🇲|🇺🇸)"`：只筛出匹配的节点作为候选
+
+---
+
+### `bypass` 会做什么（按脚本逻辑）
+
+目标：在“系统代理/看起来全局”以及 TUN 场景下，尽量保证这些目标**永远直连**。
+
+- **IP 网段（推荐 RFC1918）**
+  - `BYPASS_IP_CIDRS="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"`
+- **域名白名单（示例用 baidu.com，实际请写你自己的）**
+  - `BYPASS_DOMAINS="baidu.com"`
+- **DNS（可选）**
+  - `BYPASS_INTERNAL_DNS="system"`：用 macOS 当前系统 DNS（自动跟随变化）
+  - 或指定：`BYPASS_INTERNAL_DNS="10.0.0.2,10.0.0.3"`
+
+脚本会写入/补全：
+- `dns.fake-ip-filter`（避免白名单域名被 fake-ip 影响）
+- （mihomo 模式下）`tun.route-exclude-address`（让 RFC1918 网段尽量“不进 TUN/不进代理链路”）
+- `rules:` 顶部插入 `DIRECT` 规则作为兜底
+
+查看当前检测到的系统 DNS：
+
+```bash
+python3 "patch_clash_subscription.py" dummy --print-system-dns
 ```
 
 ---
 
-### 美国节点通配符匹配（读者最容易踩坑的点）
+### 兼容性（强烈建议看一眼）
 
-脚本不会要求你写死 `["🇺🇲 美国 01", "🇺🇲 美国 02", "🇺🇲 美国 03"]`，而是会：
-1) 从 `proxies:` 扫描所有节点的 `name`
-2) 用 `US_NODE_PATTERNS` 进行匹配
-3) 匹配到的节点作为 `🇺🇲 美国-中继择优` 的候选列表（保持原始顺序）
+这个脚本**离线 patch YAML**，无法 100% 确认你运行时内核；因此提供 `--compat`：
 
-配置项：
-- **`US_NODE_PATTERNS`**：模式列表
-  - glob：`* ? [abc]`
-  - 正则：以 `re:` 开头，例如 `re:^🇺🇲\\s*美国\\s*\\d+$`
-- **`US_NODES_FALLBACK`**：一个都匹配不到时的兜底列表（避免生成空组）
-
-如果你订阅里的美国节点命名不是 “🇺🇲 美国 01/02/03” 这种形式，请务必调整 `US_NODE_PATTERNS`，例如：
-- `"*美国*"`（宽松匹配）
-- `"US-*"`（匹配 `US-NewYork-01`）
-- `re:.*\\bUS\\b.*`（正则示例）
+- `--compat auto`（默认）：根据 YAML 内容做启发式判断
+- `--compat mihomo`：允许写 `dialer-proxy` / `tun` / `dns.nameserver-policy`
+- `--compat classic`：保守模式（跳过可能不支持的字段，尽量不写崩）
 
 ---
 
-### 回滚方式（出问题如何恢复）
+### 常用命令
 
-脚本默认会生成备份文件，例如：
-- `subscription_xxx.yaml.bak.20251214-010203`
+只看会改什么（不写入）：
 
-如果补丁后不满意，直接用备份文件覆盖原文件即可恢复。
+```bash
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --dry-run
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --diff
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml" --changelog
+```
 
+执行写入（默认会生成 `.bak.*` 备份）：
 
+```bash
+python3 "patch_clash_subscription.py" "/绝对路径/你的订阅.yaml"
+```
+
+回滚：
+- 用最近的 `*.bak.YYYYmmdd-HHMMSS` 覆盖原文件即可
